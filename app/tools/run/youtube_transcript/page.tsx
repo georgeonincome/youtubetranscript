@@ -128,10 +128,12 @@ function YoutubeTranscriptContent() {
         body: JSON.stringify({ videoUrl: decodedUrl, langCode: langParam }),
       });
 
-      const data: TranscriptResponse | { error: string } = await res.json();
+      const data = await res.json();
 
       if (!res.ok || 'error' in data) {
-        setError(`Couldn't get transcript for video: ${id} language: ${langParam}`);
+        // Use the detailed error message from the API, or fall back to generic
+        const errMsg = (data as any).detail || (data as any).originalError || (data as any).error || `Couldn't get transcript for video: ${id} language: ${langParam}`;
+        setError(errMsg);
         return;
       }
 

@@ -1,113 +1,117 @@
 /**
  * POST /api/transcript
- * 
+ * GET /api/transcript?videoUrl=...&langCode=en
+ *
  * Replicates Tactiq's transcript API contract:
  *   POST https://tactiq-apps-prod.tactiq.io/transcript
  *   Headers: { content-type: application/json, X-Firebase-AppCheck: <token> }
  *   Body: { videoUrl: string, langCode: string }
- *   Response: { title: string, captions: [{ text, start, dur }] }
- * 
- * Our version uses the youtube-transcript npm package (no Firebase AppCheck needed).
+ *   Response: { title: string, captions: [{ text, start, dur }], source: string }
+ *
+ * Uses youtube-transcript npm package with custom retry-enabled fetch,
+ * plus fallbacks to InnerTube API and watch page scraping.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { fetchTranscript } from 'youtube-transcript';
 import { extractVideoId } from '@/lib/utils';
+import { getTranscript } from '@/lib/youtube';
 
 export async function POST(request: NextRequest) {
+  let videoUrl: string | undefined;
+  let langCode: string | undefined;
+
   try {
     const body = await request.json();
-    const { videoUrl, langCode } = body;
+    videoUrl = body.videoUrl;
+    langCode = body.langCode;
+  } catch {
+    return NextResponse.json(
+      { error: 'Invalid JSON body' },
+      { status: 400 }
+    );
+  }
 
-    if (!videoUrl) {
+  if (!videoUrl) {
+    return NextResponse.json(
+      { error: 'Missing videoUrl parameter' },
+      { status: 400 }
+    );
+  }
+
+  const videoId = extractVideoId(videoUrl);
+  if (!videoId) {
+    return NextResponse.json(
+      { error: 'Could not extract video ID from URL' },
+      { status: 400 }
+    );
+  }
+
+  const lang = langCode || 'en';
+
+  try {
+    const result = await getTranscript(videoUrl, lang);
+    return NextResponse.json({
+      title: result.title,
+      captions: result.captions,
+      source: result.source,
+      videoId: videoId,
+    });
+  } catch (error: any) {
+    console.error('Transcript fetch error:', error);
+
+    const errorMessage = error.message || 'Failed to fetch transcript';
+
+    // Map known error types to appropriate status codes
+    if (errorMessage.includes('captcha') || errorMessage.includes('rate limit') || errorMessage.includes('Too Many Request')) {
       return NextResponse.json(
-        { error: 'Missing videoUrl parameter' },
-        { status: 400 }
+        {
+          error: `YouTube is rate limiting requests from this server. Try again in a few seconds.`,
+          videoId,
+          language: lang,
+          originalError: errorMessage,
+        },
+        { status: 429 }
       );
     }
 
-    const videoId = extractVideoId(videoUrl);
-    if (!videoId) {
+    if (errorMessage.includes('disabled') || errorMessage.includes('No transcripts') || errorMessage.includes('not available')) {
       return NextResponse.json(
-        { error: 'Could not extract video ID from URL' },
-        { status: 400 }
-      );
-    }
-
-    const lang = langCode || 'en';
-
-    // Fetch transcript from YouTube using youtube-transcript package
-    // Returns: [{ text, duration, offset, lang }]
-    // Note: duration and offset are in milliseconds
-    const transcript = await fetchTranscript(videoId, { lang });
-
-    if (!transcript || transcript.length === 0) {
-      return NextResponse.json(
-        { error: 'No transcript available for this video' },
+        {
+          error: `Transcript is not available for this video. It may be disabled by the creator or unavailable in ${lang}.`,
+          videoId,
+          language: lang,
+          originalError: errorMessage,
+        },
         { status: 404 }
       );
     }
 
-    // Get video title from YouTube oEmbed API
-    let title = videoId;
-    try {
-      const oembedRes = await fetch(
-        `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
-        { next: { revalidate: 3600 } } // cache for 1 hour
-      );
-      if (oembedRes.ok) {
-        const oembedData = await oembedRes.json();
-        title = oembedData.title || videoId;
-      }
-    } catch {
-      // Fallback: try to scrape title from watch page
-      try {
-        const watchRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
-          headers: {
-            'User-Agent':
-              'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          },
-        });
-        const html = await watchRes.text();
-        const titleMatch = html.match(/<title>([^<]*)<\/title>/);
-        if (titleMatch) {
-          title = titleMatch[1].replace(' - YouTube', '').trim();
-        }
-      } catch {
-        /* keep videoId as fallback title */
-      }
-    }
-
-    // Convert to Tactiq's format: {text, start, dur} (seconds, not ms)
-    const captions = transcript.map((item) => ({
-      text: item.text,
-      start: Math.round((item.offset || 0) / 1000),
-      dur: Math.round((item.duration || 0) / 1000),
-    }));
-
-    return NextResponse.json({ title, captions });
-  } catch (error: any) {
-    console.error('Transcript fetch error:', error);
-
-    // Handle rate limiting from youtube-transcript
-    if (error.statusCode === 429) {
+    if (errorMessage.includes('unavailable') || errorMessage.includes('no longer available')) {
       return NextResponse.json(
-        { error: 'Rate limited by YouTube. Try again in a few seconds.' },
-        { status: 429 }
+        {
+          error: `This video is unavailable. It may be private, deleted, or restricted.`,
+          videoId,
+          language: lang,
+          originalError: errorMessage,
+        },
+        { status: 410 }
       );
     }
 
     return NextResponse.json(
       {
-        error: error.message || 'Failed to fetch transcript',
-        statusCode: error.statusCode || 500,
+        error: `Couldn't get transcript for video: ${videoId} language: ${lang}`,
+        videoId,
+        language: lang,
+        originalError: errorMessage,
+        detail: errorMessage,
       },
-      { status: error.statusCode || 500 }
+      { status: 500 }
     );
   }
 }
 
-// Also support GET for simple usage
+// GET endpoint — same logic, reads from query params
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const videoUrl = searchParams.get('videoUrl') || searchParams.get('url') || searchParams.get('yt');
@@ -120,10 +124,48 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // Reuse POST logic by creating a mock request
-  const mockRequest = {
-    json: async () => ({ videoUrl, langCode }),
-  } as any;
+  const videoId = extractVideoId(videoUrl);
+  if (!videoId) {
+    return NextResponse.json(
+      { error: 'Could not extract video ID from URL' },
+      { status: 400 }
+    );
+  }
 
-  return POST(mockRequest);
+  const lang = langCode || 'en';
+
+  try {
+    const result = await getTranscript(videoUrl, lang);
+    return NextResponse.json({
+      title: result.title,
+      captions: result.captions,
+      source: result.source,
+      videoId: videoId,
+    });
+  } catch (error: any) {
+    const errorMessage = error.message || 'Failed to fetch transcript';
+
+    if (errorMessage.includes('captcha') || errorMessage.includes('rate limit') || errorMessage.includes('Too Many Request')) {
+      return NextResponse.json(
+        {
+          error: `YouTube is rate limiting requests from this server. Try again in a few seconds.`,
+          videoId,
+          language: lang,
+          originalError: errorMessage,
+        },
+        { status: 429 }
+      );
+    }
+
+    return NextResponse.json(
+      {
+        error: `Couldn't get transcript for video: ${videoId} language: ${lang}`,
+        videoId,
+        language: lang,
+        originalError: errorMessage,
+        detail: errorMessage,
+      },
+      { status: 500 }
+    );
+  }
 }
