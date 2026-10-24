@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom styles matching Tactiq design */
+.text-custom-gray {
+  color: #b7b4c7;
+}
+
+.gradient-glow {
+  filter: blur(20px);
+  background: linear-gradient(90deg, #4d54ffa3 0%, #ff3868a4 100%);
+}
+
+/* Custom scrollbar for transcript */
+#transcript::-webkit-scrollbar {
+  width: 8px;
+}
+
+#transcript::-webkit-scrollbar-track {
+  background: #241f3a;
+  border-radius: 10px;
+}
+
+#transcript::-webkit-scrollbar-thumb {
+  background: #4d54ff;
+  border-radius: 10px;
+}
+
+#transcript::-webkit-scrollbar-thumb:hover {
+  background: #5d64ff;
+}
+
+/* Font imports */
+@import url('https://fonts.googleapis.com/css2?family=Figtree:wght@300;400;500;600;700;800;900&family=Geist+Mono:wght@300;400;500;600&family=Newsreader:wght@300;400;500;600;700&display=swap');
